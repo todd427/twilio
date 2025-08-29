@@ -1,0 +1,5 @@
+# Kermit
+python chat_hf.py --model /home/todd/training/ckpts/toddric-3b-merged-v3-bnb4 \
+  --trust-remote-code --quiet --persona kermit.json \
+  --strip-identity "*" --no-stream --temperature 0 --max-new-tokens 80
+
