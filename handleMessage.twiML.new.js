@@ -140,27 +140,34 @@ exports.handler = function (context, event, callback) {
       throw e;
     });
   }
-    // Reset server-side session
-    if (userMsg.toLowerCase() === 'reset') {
-      if (context.TODDRIC_API_URL) {
-        await fetch(context.TODDRIC_API_URL.replace(/\/+$/,'') + '/reset', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ session_id: sessionId })
-        }).catch(()=>{});
-      }
-      return replySMS('Okay, cleared our chat.');
-    }
+  // ---- Simple commands (ES5 style; no async/await) ----
 
-    // Ask the model "who are you?" on the server
-    if (userMsg.toLowerCase() === 'whoami') {
-      if (context.TODDRIC_API_URL) {
-        const r = await fetch(context.TODDRIC_API_URL.replace(/\/+$/,'') + '/whoami');
-        const j = await r.json().catch(()=>null);
-        return replySMS(j && j.model ? `model: ${j.model}` : 'model: unknown');
-      }
-      return replySMS('model: (no server)');
+  // Reset server-side session
+  if (userMsg.toLowerCase() === 'reset') {
+    if (context.TODDRIC_API_URL) {
+      fetch(context.TODDRIC_API_URL.replace(/\/+$/,'') + '/reset', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ session_id: sessionId })
+      }).catch(function(){ /* ignore */ });
     }
+    return replySMS('Okay, cleared our chat.');
+  }
+
+  // Ask the server which model is loaded
+  if (userMsg.toLowerCase() === 'whoami') {
+    if (context.TODDRIC_API_URL) {
+      return fetch(context.TODDRIC_API_URL.replace(/\/+$/,'') + '/whoami')
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var msg = (j && j.model) ? ('model: ' + j.model) : 'model: unknown';
+          return replySMS(msg);
+        })
+        .catch(function(){ return replySMS('model: unknown'); });
+    }
+    return replySMS('model: (no server)');
+  }
+
   // ---- Orchestrate: Toddric -> OpenAI -> Echo ----
   tryToddric()
     .then(function (txt) { return replySMS(txt); })
