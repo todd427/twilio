@@ -1,11 +1,18 @@
-# on Rose, from the folder with app_toddric.py
-source ../venvs/twilEnv/env/bin/activate
-export TODDRIC_MODEL_DIR="/home/todd/training/ckpts/toddric-3b-merged-v3-bnb4"
-export TODDRIC_KEY=Du25zavvslnemrmDHY1X5qwO505g0OO7DgTMpO41V6A=
-# Optional tuning:
-export TODDRIC_4BIT=0           # set 1 if you want 4-bit
-export TODDRIC_DTYPE=bf16       # or fp16 if needed
-export TODDRIC_MAX_NEW=200
-export REPLY_MAX=480
-uvicorn app_toddric:app --host 0.0.0.0 --port 8000
+#!/usr/bin/env bash
+set -euo pipefail
 
+# Activate the venv you use for serving
+# adjust if your venv path differs
+source "${HOME}/venvs/trainingEnv/bin/activate"
+
+# Choose the FAST (bf16) merged model for SMS responsiveness
+export TODDRIC_MODEL="${TODDRIC_MODEL:-/home/todd/training/ckpts/toddric-3b-merged-v3}"
+
+# Perf knobs (safe defaults)
+export TODDRIC_DEVICE_MAP='{"":0}'
+export TODDRIC_ATTN="eager"
+export TODDRIC_ALLOW_DOMAINS="youtube.com,youtu.be"
+export TODDRIC_SMS_MAXNEW="${TODDRIC_SMS_MAXNEW:-60}"
+
+# Run the API (single worker keeps model in one process)
+exec uvicorn app_toddric:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info --access-log
