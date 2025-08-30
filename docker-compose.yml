@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  toddric:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Uncomment to build image with CUDA torch preinstalled:
+      # args:
+      #   TORCH_SPEC: "torch --index-url https://download.pytorch.org/whl/cu124"
+    image: toddric:latest
+    container_name: toddric
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Defaults (can be overridden by .env)
+      TODDRIC_MODEL_DIR: "${TODDRIC_MODEL_DIR:-/models}"
+      TODDRIC_DTYPE: "${TODDRIC_DTYPE:-bf16}"
+      TODDRIC_MAX_NEW: "${TODDRIC_MAX_NEW:-200}"
+      REPLY_MAX: "${REPLY_MAX:-480}"
+      TODDRIC_4BIT: "${TODDRIC_4BIT:-0}"
+      TODDRIC_KEY: "${TODDRIC_KEY:-}"  # optional shared secret
+    volumes:
+      # Mount your local model directory read-only into the container at /models
+      - ${HOST_MODEL_DIR:-/home/todd/training/ckpts}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Cloudflare quick tunnel (dev only).
+  # For production, prefer a named tunnel with config and DNS.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    depends_on:
+      toddric:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --url http://toddric:8000
+    restart: unless-stopped
+

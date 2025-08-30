@@ -1,29 +1,40 @@
-// Env Vars you can set in Twilio Console → Functions → Settings:
+// Env Vars (Twilio Console → Functions → Settings):
 //   TODDRIC_API_URL          e.g. https://your-host
 //   TAG                      optional, default "[toddric]"
-//   SMS_MAX_NEW              optional, default "140"
-//   TODDRIC_TIMEOUT_MS       optional, default "9000"   // < 10s
-//   OVERALL_TIMEOUT_MS       optional, default "9800"   // < 10s
+//   SMS_MAX_NEW              optional, default "60"
+//   TODDRIC_TIMEOUT_MS       optional, default "9000"
+//   OVERALL_TIMEOUT_MS       optional, default "9800"
+//   BEARER_TOKEN             the token your API expects (required for auth)
 //   ENABLE_OPENAI_FALLBACK   optional, "true" to enable (off by default)
-//   OPENAI_API_P1 / OPENAI_API_P2 / OPENAI_MODEL       (if fallback enabled)
+//   OPENAI_API_P1 / OPENAI_API_P2 / OPENAI_MODEL  (if fallback enabled)
+//   ECHO_OPT_OUT             optional "true" to echo STOP confirmation (Twilio already sends one)
 
 exports.handler = function (context, event, callback) {
     const MessagingResponse = Twilio.twiml.MessagingResponse;
     const twiml = new MessagingResponse();
   
     const TAG = String(context.TAG || "[toddric]");
-    const userMsg = String(event.Body || event.message || "").trim();
+    const userMsgRaw = String(event.Body || event.message || "");
+    const userMsg = userMsgRaw.trim();
+    const userMsgU = userMsg.toUpperCase();
     const from = String(event.From || "").trim();
     const sessionId = from || require("crypto").randomBytes(8).toString("hex");
   
     const TODDRIC = String(context.TODDRIC_API_URL || "");
-    const MAX_NEW_DEFAULT = parseInt(context.SMS_MAX_NEW || "140", 10);
-    const TODDRIC_TIMEOUT = parseInt(context.TODDRIC_TIMEOUT_MS || "9000", 10);
-    const OVERALL_TIMEOUT = parseInt(context.OVERALL_TIMEOUT_MS || "9800", 10);
+    const MAX_NEW_DEFAULT = parseInt(context.SMS_MAX_NEW || "60", 10);
+    const TODDRIC_TIMEOUT = parseInt(context.TODDRIC_TIMEOUT_MS || "9000", 10); // < 10s
+    const OVERALL_TIMEOUT = parseInt(context.OVERALL_TIMEOUT_MS || "9800", 10); // < 10s
+    const BEARER = String(context.BEARER_TOKEN || "");
   
     const ENABLE_FALLBACK = String(context.ENABLE_OPENAI_FALLBACK || "false") === "true";
     const OPENAI_API_KEY = (context.OPENAI_API_P1 || "") + (context.OPENAI_API_P2 || "");
     const OPENAI_MODEL = context.OPENAI_MODEL || "gpt-4o-mini";
+  
+    const ECHO_OPT_OUT = String(context.ECHO_OPT_OUT || "false") === "true";
+  
+    const STOP_WORDS  = ["STOP","STOPALL","UNSUBSCRIBE","CANCEL","END","QUIT"];
+    const START_WORDS = ["START","YES","UNSTOP"];
+    const HELP_WORDS  = ["HELP","INFO"];
   
     function send(xml) {
       const res = new Twilio.Response();
@@ -35,34 +46,45 @@ exports.handler = function (context, event, callback) {
       twiml.message(String(msg || "").slice(0, 1400));
       return send(twiml);
     }
+    function empty() { return send(new MessagingResponse()); }
+  
+    // --- Compliance keywords ---
+    if (STOP_WORDS.includes(userMsgU)) {
+      // Twilio auto-sends a STOP confirmation; avoid double by default.
+      if (ECHO_OPT_OUT) return reply("You’re unsubscribed. Reply START to resubscribe.");
+      return empty();
+    }
+    if (START_WORDS.includes(userMsgU)) {
+      return reply("You’re resubscribed. Text HELP for help. " + TAG);
+    }
+    if (HELP_WORDS.includes(userMsgU)) {
+      return reply("Help: Ask questions conversationally. Reply STOP to unsubscribe; START to rejoin. " + TAG);
+    }
   
     // quick diags
-    if (userMsg.toLowerCase() === "diag") {
-      return reply(
-        `diag: toddric=${TODDRIC ? "yes" : "no"} overall=${OVERALL_TIMEOUT}ms t_api=${TODDRIC_TIMEOUT}ms max_new=${MAX_NEW_DEFAULT}`
-      );
+    if (userMsgU === "DIAG") {
+      return reply(`diag: toddric=${TODDRIC ? "yes" : "no"} overall=${OVERALL_TIMEOUT}ms t_api=${TODDRIC_TIMEOUT}ms max_new=${MAX_NEW_DEFAULT}`);
     }
-    if (userMsg.toLowerCase() === "whoami") {
+    if (userMsgU === "WHOAMI") {
       if (!TODDRIC) return reply("model: (no server)");
       return fetch(TODDRIC.replace(/\/+$/,"") + "/whoami")
         .then(r => r.json()).then(j => reply(j && j.model ? `model: ${j.model}` : "model: unknown"))
         .catch(() => reply("model: unknown"));
     }
-    if (userMsg.toLowerCase() === "reset") {
+    if (userMsgU === "RESET") {
       if (TODDRIC) {
         fetch(TODDRIC.replace(/\/+$/,"") + "/reset", {
           method: "POST",
-          headers: {"Content-Type":"application/json"},
+          headers: {"Content-Type":"application/json", ...(BEARER ? {"Authorization":"Bearer "+BEARER} : {})},
           body: JSON.stringify({ session_id: sessionId })
         }).catch(()=>{});
       }
       return reply(`Okay, cleared our chat. ${TAG}`);
     }
   
-    // Heuristic: “knowledgey” prompts → shorter SMS response
+    // Heuristic: knowledgey prompts → shrink SMS
     const isKnowledge = /\b(who|what|tell me about|know about|history|biography|bio|explain)\b/i.test(userMsg);
-    const MAX_NEW_LOCAL = isKnowledge ? Math.min(80, MAX_NEW_DEFAULT) : MAX_NEW_DEFAULT;  // tighter for knowledgey
-    const STYLE = isKnowledge ? "sms_short" : "default";
+    const MAX_NEW_LOCAL = isKnowledge ? Math.min(80, MAX_NEW_DEFAULT) : MAX_NEW_DEFAULT;
     const INSTRUCTION = isKnowledge
       ? "Reply in 2–3 concise sentences, SMS-friendly, no markdown, no disclaimers."
       : "Be concise and SMS-friendly.";
@@ -72,7 +94,7 @@ exports.handler = function (context, event, callback) {
       const ctl = new AbortController();
       const timer = setTimeout(() => { try { ctl.abort(); } catch(e){} }, ms);
       return promiseFactory(ctl.signal).finally(() => clearTimeout(timer))
-        .catch(e => { throw new Error((label||"timeout") + ":" + (e && e.message || e)); });
+        .catch(e => { throw new Error((label||"timeout")+":"+(e && e.message || e)); });
     }
   
     function callToddric(signal) {
@@ -82,14 +104,16 @@ exports.handler = function (context, event, callback) {
         message: userMsg,
         session_id: sessionId,
         max_new_tokens: MAX_NEW_LOCAL,
-        temperature: isKnowledge ? 0.2 : 0.5,
-        top_p: 0.9,
-        style: STYLE,
+        temperature: 0.0,                 // greedy for speed
+        style: "sms_short",
         instruction: INSTRUCTION
       };
       return fetch(url, {
         method: "POST",
-        headers: {"Content-Type":"application/json"},
+        headers: {
+          "Content-Type":"application/json",
+          ...(BEARER ? {"Authorization":"Bearer "+BEARER} : {}),
+        },
         body: JSON.stringify(payload),
         signal
       })
@@ -114,10 +138,7 @@ exports.handler = function (context, event, callback) {
       };
       return fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
-        headers: {
-          "Content-Type":"application/json",
-          "Authorization":"Bearer " + OPENAI_API_KEY
-        },
+        headers: { "Content-Type":"application/json", "Authorization":"Bearer "+OPENAI_API_KEY },
         body: JSON.stringify(payload),
         signal
       })
@@ -133,8 +154,11 @@ exports.handler = function (context, event, callback) {
     withTimeout(callToddric, TODDRIC_TIMEOUT, "toddric_timeout")
       .then(txt => { if (!finished) { finished = true; clearTimeout(overallTimer); reply(`${txt} ${TAG}`); } })
       .catch(() => {
-        if (!ENABLE_FALLBACK) { if (!finished) { finished = true; clearTimeout(overallTimer); reply("Sorry, that took too long. Try a shorter ask. " + TAG); } return; }
-        const fbTimeout = Math.min(3000, Math.max(1500, OVERALL_TIMEOUT - 1500)); // small headroom
+        if (!ENABLE_FALLBACK) {
+          if (!finished) { finished = true; clearTimeout(overallTimer); reply("Sorry, that took too long. Try a shorter ask. " + TAG); }
+          return;
+        }
+        const fbTimeout = Math.min(3000, Math.max(1500, OVERALL_TIMEOUT - 1500));
         withTimeout(callOpenAI, fbTimeout, "fallback_timeout")
           .then(txt => { if (!finished) { finished = true; clearTimeout(overallTimer); reply(`${txt} ${TAG}`); } })
           .catch(() => { if (!finished) { finished = true; clearTimeout(overallTimer); reply("Timed out. Try again with fewer details. " + TAG); } });
