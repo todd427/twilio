@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.log
+# Don’t copy huge local caches into the image
+huggingface/
+.cache/
+

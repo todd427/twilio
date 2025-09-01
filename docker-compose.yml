@@ -1,13 +1,14 @@
-version: "3.9"
-
 services:
   toddric:
     build:
       context: .
       dockerfile: Dockerfile
-      # Uncomment to build image with CUDA torch preinstalled:
+      # Option A (GPU on Rose): build with CUDA 12.4 torch wheel
       # args:
       #   TORCH_SPEC: "torch --index-url https://download.pytorch.org/whl/cu124"
+      # Option B (CPU): comment args above and install CPU torch after start, or:
+      # args:
+      #   TORCH_SPEC: "torch==2.4.1"
     image: toddric:latest
     container_name: toddric
     ports:
@@ -15,15 +16,13 @@ services:
     env_file:
       - .env
     environment:
-      # Defaults (can be overridden by .env)
-      TODDRIC_MODEL_DIR: "${TODDRIC_MODEL_DIR:-/models}"
+      TODDRIC_MODEL_DIR: "${TODDRIC_MODEL_DIR:-/models/toddric-3b-merged-v3-bnb4}"
       TODDRIC_DTYPE: "${TODDRIC_DTYPE:-bf16}"
       TODDRIC_MAX_NEW: "${TODDRIC_MAX_NEW:-200}"
       REPLY_MAX: "${REPLY_MAX:-480}"
       TODDRIC_4BIT: "${TODDRIC_4BIT:-0}"
-      TODDRIC_KEY: "${TODDRIC_KEY:-}"  # optional shared secret
+      TODDRIC_KEY: "${TODDRIC_KEY:-}"
     volumes:
-      # Mount your local model directory read-only into the container at /models
       - ${HOST_MODEL_DIR:-/home/todd/training/ckpts}:/models:ro
     deploy:
       resources:
@@ -39,11 +38,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # Optional: Cloudflare quick tunnel (dev only).
-  # For production, prefer a named tunnel with config and DNS.
+  # Optional dev tunnel (random URL). For prod: use a named tunnel/systemd.
   cloudflared:
     image: cloudflare/cloudflared:latest
-    container_name: cloudflared
     depends_on:
       toddric:
         condition: service_healthy

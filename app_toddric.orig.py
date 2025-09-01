@@ -51,7 +51,7 @@ def check_rate_limit(ip: str, session_id: Optional[str]):
         q.append(now)
 
 # ---- Model perf defaults ----
-MODEL_PATH = os.environ.get("TODDRIC_MODEL", "/home/todd/training/ckpts/toddric-1_5b-merged-v1")
+MODEL_PATH = os.environ.get("TODDRIC_MODEL", "/home/todd/training/ckpts/toddric-3b-merged-v3")
 DEVICE_MAP = os.environ.get("TODDRIC_DEVICE_MAP", None)
 if DEVICE_MAP:
     try: DEVICE_MAP = eval(DEVICE_MAP, {"__builtins__": {}})

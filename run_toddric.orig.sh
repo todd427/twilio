@@ -6,7 +6,7 @@ set -euo pipefail
 source "${HOME}/venvs/trainingEnv/bin/activate"
 
 # Choose the FAST (bf16) merged model for SMS responsiveness
-export TODDRIC_MODEL="${TODDRIC_MODEL:-/home/todd/training/ckpts/toddric-1_5b-merged-v1}"
+export TODDRIC_MODEL="${TODDRIC_MODEL:-/home/todd/training/ckpts/toddric-3b-merged-v3}"
 export RL_MAX=30
 export RL_WINDOW=300
 # Perf knobs (safe defaults)
