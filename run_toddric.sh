@@ -20,4 +20,14 @@ export TODDRIC_BEARER=7ff03c53-5529-43a2-b549-695957c8d161
 
 
 # Run the API (single worker keeps model in one process)
-exec uvicorn app_toddric:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info --access-log
+#exec uvicorn app_toddric:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info --access-log
+exec uvicorn app_toddric:app \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --workers 1 \
+  --timeout-keep-alive 30 \
+  --loop uvloop \
+  --http h11 \
+  --log-level info \
+  --access-log
+
