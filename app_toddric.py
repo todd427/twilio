@@ -1,4 +1,4 @@
-import os, re, logging, time, statistics, sqlite3, torch
+import os, re, logging, time, statistics, sqlite3, requests, torch
 from collections import deque, defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -9,15 +9,18 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # ---------- Config ----------
 MODEL = os.getenv("TODDRIC_MODEL", "/home/todd/training/ckpts/toddric-1_5b-merged-v1")
-DEFAULT_TZ = os.getenv("TODDRIC_DEFAULT_TZ", "UTC")       # e.g. "Europe/Dublin"
-DB_PATH = os.getenv("TODDRIC_DB", "./toddric.db")         # SQLite file
+DEFAULT_TZ = os.getenv("TODDRIC_DEFAULT_TZ", "UTC")           # e.g. "Europe/Dublin"
+DB_PATH = os.getenv("TODDRIC_DB", "./toddric.db")             # SQLite file path
 
 # ---------- Logging ----------
 logger = logging.getLogger("toddric")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# ---------- DB ----------
+def now_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+# ---------- DB Setup ----------
 def db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -50,26 +53,32 @@ def db():
 
 DB = db()
 
+# --- user prefs (tz) ---
 def db_get_tz(session_id: str):
     cur = DB.execute("SELECT tz FROM user_prefs WHERE session_id=?", (session_id,))
     row = cur.fetchone()
     return row[0] if row else None
 
 def db_set_tz(session_id: str, tz: str):
-    now = datetime.utcnow().isoformat() + "Z"
     DB.execute(
         "INSERT INTO user_prefs(session_id, tz, updated_at) VALUES(?,?,?) "
         "ON CONFLICT(session_id) DO UPDATE SET tz=excluded.tz, updated_at=excluded.updated_at",
-        (session_id, tz, now)
+        (session_id, tz, now_iso())
     )
     DB.commit()
 
+def db_delete_session(session_id: str):
+    DB.execute("DELETE FROM user_prefs WHERE session_id=?", (session_id,))
+    DB.execute("DELETE FROM chunks WHERE session_id=?", (session_id,))
+    DB.execute("DELETE FROM memory WHERE session_id=?", (session_id,))
+    DB.commit()
+
+# --- chunks for MORE ---
 def db_store_chunk(session_id: str, text: str):
-    now = datetime.utcnow().isoformat() + "Z"
     DB.execute(
         "INSERT INTO chunks(session_id, text, offset, updated_at) VALUES(?,?,0,?) "
         "ON CONFLICT(session_id) DO UPDATE SET text=excluded.text, offset=0, updated_at=excluded.updated_at",
-        (session_id, text, now)
+        (session_id, text, now_iso())
     )
     DB.commit()
 
@@ -81,37 +90,35 @@ def db_next_chunk(session_id: str, max_len: int):
     text, offset = row
     if offset >= len(text):
         return "", offset, True
-    # Find a nice break ≤ max_len: prefer whitespace/punct
+
     end = min(offset + max_len, len(text))
     if end < len(text):
+        # prefer breaking at whitespace/punct within window
         slice_ = text[offset:end]
-        # try to cut at last whitespace or punctuation
         m = re.search(r"[ \t\n\r.,;:!?](?!.*[ \t\n\r.,;:!?])", slice_)
         cut = end
         if m:
-            cut = offset + m.start() + 1  # include the boundary char
+            cut = offset + m.start() + 1
         else:
-            # fallback: walk backwards to first space in window
-            for i in range(end-1, offset, -1):
+            for i in range(end - 1, offset, -1):
                 if text[i].isspace():
                     cut = i
                     break
-        end = max(cut, offset + min(40, len(text)-offset))  # guard against zero progress
+        end = max(cut, offset + min(40, len(text) - offset))  # ensure progress
+
     chunk = text[offset:end].strip()
     new_off = end
     done = new_off >= len(text)
-    now = datetime.utcnow().isoformat() + "Z"
-    DB.execute("UPDATE chunks SET offset=?, updated_at=? WHERE session_id=?", (new_off, now, session_id))
+    DB.execute("UPDATE chunks SET offset=?, updated_at=? WHERE session_id=?", (new_off, now_iso(), session_id))
     DB.commit()
     return chunk, new_off, done
 
-# (optional) simple memory helpers — ready to use later
+# --- memory helpers ---
 def db_memory_set(session_id: str, key: str, value: str):
-    now = datetime.utcnow().isoformat() + "Z"
     DB.execute(
         "INSERT INTO memory(session_id, key, value, updated_at) VALUES(?,?,?,?) "
         "ON CONFLICT(session_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (session_id, key, value, now)
+        (session_id, key, value, now_iso())
     )
     DB.commit()
 
@@ -120,7 +127,59 @@ def db_memory_get(session_id: str, key: str):
     row = cur.fetchone()
     return row[0] if row else None
 
-# ---------- GPU setup ----------
+def build_profile(session_id: str | None) -> str:
+    if not session_id:
+        return ""
+    cur = DB.execute(
+        "SELECT key, value FROM memory WHERE session_id=? ORDER BY updated_at DESC LIMIT 12",
+        (session_id,)
+    )
+    items = [f"{k.strip()}: {v.strip()}" for (k, v) in cur.fetchall() if k and v]
+    if not items:
+        return ""
+    return "Known user facts — " + "; ".join(items) + ". Use naturally if relevant."
+
+# ---------- Weather (Open-Meteo, no key) ----------
+def geocode_open_meteo(query: str):
+    try:
+        r = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": query, "count": 1, "language": "en", "format": "json"},
+            timeout=5,
+        )
+        j = r.json()
+        if j.get("results"):
+            it = j["results"][0]
+            return float(it["latitude"]), float(it["longitude"]), it.get("timezone") or "UTC", it.get("name")
+    except Exception:
+        pass
+    return None, None, None, None
+
+def weather_open_meteo(lat: float, lon: float, tz: str):
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat, "longitude": lon,
+                "current": ["temperature_2m","precipitation"],
+                "daily": ["temperature_2m_max","temperature_2m_min","precipitation_probability_max"],
+                "timezone": tz,
+            },
+            timeout=6,
+        )
+        j = r.json()
+        cur = j.get("current", {})
+        daily = j.get("daily", {})
+        t = cur.get("temperature_2m")
+        p = cur.get("precipitation")
+        tmax = (daily.get("temperature_2m_max") or [None])[0]
+        tmin = (daily.get("temperature_2m_min") or [None])[0]
+        pprob = (daily.get("precipitation_probability_max") or [None])[0]
+        return t, p, tmax, tmin, pprob
+    except Exception:
+        return None, None, None, None, None
+
+# ---------- GPU + Model ----------
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda:0")
@@ -143,7 +202,7 @@ all_requests_total = 0
 chat_requests_total = 0
 chat_errors_total = 0
 chat_lat_ms = deque(maxlen=METRIC_WINDOW)
-server_started_at = datetime.utcnow().isoformat() + "Z"
+server_started_at = now_iso()
 channels = ("sms", "wa", "unknown")
 chat_by_channel = defaultdict(int)
 errors_by_channel = defaultdict(int)
@@ -157,7 +216,6 @@ def get_percentiles(values):
         f = int(k); c = min(f + 1, len(v) - 1)
         if f == c: return float(v[f])
         return float(v[f] * (c - k) + v[c] * (k - f))
-    import statistics
     avg = statistics.mean(v)
     return avg, pct(50), pct(95), pct(99)
 
@@ -226,8 +284,15 @@ class MoreReq(BaseModel):
     session_id: str
     max_chars: int = 300
 
+class ResetReq(BaseModel):
+    session_id: str
+
+class MemorySet(BaseModel):
+    session_id: str
+    key: str
+    value: str
+
 # ---------- App ----------
-from fastapi import FastAPI
 app = FastAPI()
 
 @app.middleware("http")
@@ -237,10 +302,12 @@ async def count_all_requests(request: Request, call_next):
     return await call_next(request)
 
 @app.get("/whoami")
-def whoami(): return {"model": "toddric-1_5b-merged-v1@uvicorn"}
+def whoami():
+    return {"model": "toddric-1_5b-merged-v1@uvicorn"}
 
 @app.get("/healthz")
-def healthz(): return {"status": "ok", "time": datetime.utcnow().isoformat() + "Z"}
+def healthz():
+    return {"status": "ok", "time": now_iso()}
 
 @app.get("/metrics")
 def metrics(format: str = Query("json", pattern="^(json|prom)$")):
@@ -253,10 +320,8 @@ def get_tz(session_id: str = Query(..., description="sender/session id")):
 @app.post("/tz")
 def set_tz(body: TzReq):
     if not body.session_id: raise HTTPException(400, "session_id required")
-    try:
-        ZoneInfo(body.tz)
-    except Exception:
-        raise HTTPException(400, f"invalid_tz: {body.tz}")
+    try: ZoneInfo(body.tz)
+    except Exception: raise HTTPException(400, f"invalid_tz: {body.tz}")
     db_set_tz(body.session_id, body.tz)
     logger.info("TZ set via /tz: session_id=%s tz=%s", body.session_id, body.tz)
     return {"ok": True, "session_id": body.session_id, "tz": body.tz}
@@ -268,14 +333,50 @@ def more(body: MoreReq):
     chunk, pos, done = db_next_chunk(body.session_id, max_chars)
     return {"chunk": chunk, "offset": pos, "done": bool(done)}
 
+@app.post("/reset")
+def reset(body: ResetReq):
+    if not body.session_id: raise HTTPException(400, "session_id required")
+    db_delete_session(body.session_id)
+    return {"ok": True}
+
+@app.post("/memory")
+def memory_set(body: MemorySet):
+    if not body.session_id or not body.key:
+        raise HTTPException(400, "session_id and key required")
+    db_memory_set(body.session_id, body.key.strip()[:64], body.value.strip()[:400])
+    return {"ok": True}
+
+@app.get("/memory")
+def memory_get(session_id: str = Query(...), key: str = Query(...)):
+    v = db_memory_get(session_id, key)
+    if v is None:
+        raise HTTPException(404, "not found")
+    return {"value": v}
+
+@app.get("/weather")
+def weather(loc: str = Query(..., description="city or place"), session_id: str | None = None):
+    lat, lon, tz, name = geocode_open_meteo(loc)
+    if lat is None:
+        raise HTTPException(404, f"Could not locate '{loc}'")
+    t, p, tmax, tmin, pprob = weather_open_meteo(lat, lon, tz)
+    if t is None:
+        raise HTTPException(503, "Weather unavailable")
+    return {
+        "place": name or loc,
+        "tz": tz,
+        "current": {"temp_c": t, "precip_mm": p},
+        "today": {"tmax_c": tmax, "tmin_c": tmin, "precip_prob_pct": pprob},
+    }
+
 # ---------- Helpers ----------
 import asyncio
 gate = asyncio.Semaphore(1)
+
 def norm_channel(ch: str | None) -> str:
     ch = (ch or "").lower().strip()
     return ch if ch in ("sms","wa") else "unknown"
 
-def resolve_tz(session_id: str | None, req_tz: str | None) -> str:
+def resolve_tz_for_req(session_id: str | None, req_tz: str | None) -> str:
     if req_tz:
         try: ZoneInfo(req_tz); return req_tz
         except Exception: pass
@@ -303,9 +404,19 @@ async def chat(req: ChatReq):
     chat_by_channel[chan] += 1
     logger.info("CHAT in: channel=%s session_id=%s supplied_tz=%s msg=%r", chan, req.session_id, req.timezone, msg)
 
+    # First-contact welcome (persist a default tz row if totally new)
+    first_contact = False
+    if req.session_id:
+        cur = DB.execute("SELECT 1 FROM user_prefs WHERE session_id=?", (req.session_id,))
+        if not cur.fetchone():
+            first_contact = True
+            db_set_tz(req.session_id, DEFAULT_TZ)
+
     msg_norm = msg.replace("\u00A0", " ")
 
-    # STATS/metrics via SMS
+    # ----- Commands -----
+
+    # STATS via chat
     if msg_norm.upper() in {"STATS", "METRICS"}:
         m = metrics_json(); lat = m["chat_latency_ms"]; ch = m["channels"]
         txt = (f"Reqs:{m['requests_total']} Chat:{m['chat_requests_total']} Err:{m['chat_errors_total']} | "
@@ -315,34 +426,83 @@ async def chat(req: ChatReq):
         dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
         return {"text": txt}
 
-    # TZ command: "TZ Europe/Dublin"
+    # TZ command
     if msg_norm.upper().startswith("TZ "):
         if not req.session_id:
             chat_errors_total += 1; errors_by_channel[chan] += 1
             raise HTTPException(400, "session_id required to set timezone")
         tz_candidate = msg_norm[3:].strip().strip(".,;:!\"'")
-        try:
-            ZoneInfo(tz_candidate)
-        except Exception:
-            return {"text": f"Invalid timezone: {tz_candidate}"}
+        try: ZoneInfo(tz_candidate)
+        except Exception: return {"text": f"Invalid timezone: {tz_candidate}"}
         db_set_tz(req.session_id, tz_candidate)
-        now = datetime.now(ZoneInfo(tz_candidate)).strftime("%H:%M")
+        now_local = datetime.now(ZoneInfo(tz_candidate)).strftime("%H:%M")
         dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
-        return {"text": f"Timezone set to {tz_candidate}. Local time is {now}."}
+        return {"text": f"Timezone set to {tz_candidate}. Local time is {now_local}."}
 
     # Clock hook
     lower = msg_norm.lower()
     if ("time" in lower and "?" in lower) or lower in {"time", "what time is it", "current time"}:
-        tz = resolve_tz(req.session_id, req.timezone)
-        now = datetime.now(ZoneInfo(tz))
+        tz = resolve_tz_for_req(req.session_id, req.timezone)
+        now_local = datetime.now(ZoneInfo(tz)).strftime("%H:%M")
         dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
-        return {"text": f"The current time in {tz} is {now.strftime('%H:%M')}."}
+        return {"text": f"The current time in {tz} is {now_local}."}
 
-    # Generation
+    # WEATHER command: "/weather Dublin" or "weather Dublin"
+    m_w = re.match(r"^\/?\s*weather(?:\s+(.+))?$", msg_norm, flags=re.I)
+    if m_w:
+        place = (m_w.group(1) or "").strip()
+        if not place:
+            return {"text": "Usage: WEATHER <city>, e.g., WEATHER Dublin"}
+        lat, lon, wtz, name = geocode_open_meteo(place)
+        if lat is None:
+            return {"text": f"Couldn’t find '{place}'."}
+        t, p, tmax, tmin, pprob = weather_open_meteo(lat, lon, wtz)
+        if t is None:
+            return {"text": "Weather service temporarily unavailable."}
+        txt = f"{name}: {t:.0f}°C now, {tmin:.0f}–{tmax:.0f}°C today, rain {pprob}%."
+        dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
+        return {"text": txt}
+
+    # REMEMBER key: value
+    m_mem = re.match(r"^remember\s+([^:=]+)\s*[:=]\s*(.+)$", msg_norm, flags=re.I)
+    if m_mem and req.session_id:
+        k = m_mem.group(1).strip()[:64]
+        v = m_mem.group(2).strip()[:400]
+        db_memory_set(req.session_id, k, v)
+        dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
+        return {"text": f"Got it. I’ll remember {k}."}
+
+    # RECALL key
+    m_rec = re.match(r"^recall\s+(.+)$", msg_norm, flags=re.I)
+    if m_rec and req.session_id:
+        k = m_rec.group(1).strip()
+        v = db_memory_get(req.session_id, k)
+        dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
+        return {"text": (v if v else f"I don’t have '{k}'.")}
+
+    # FORGET key
+    m_fgt = re.match(r"^forget\s+(.+)$", msg_norm, flags=re.I)
+    if m_fgt and req.session_id:
+        k = m_fgt.group(1).strip()
+        DB.execute("DELETE FROM memory WHERE session_id=? AND key=?", (req.session_id, k))
+        DB.commit()
+        dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
+        return {"text": f"Forgot {k}."}
+
+    # If it's the first message ever, greet and exit early
+    if first_contact:
+        dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
+        return {"text": "Welcome to Toddric! 👋 Ask me anything in 1–2 sentences. Text HELP for House Rules."}
+
+    # ----- Normal generation -----
+    profile = build_profile(req.session_id)
     sys = req.instruction or (
         "You are Toddric — pragmatic, wry, helpful. "
         "Constraints: 1–2 sentences, no fluff, no markdown, SMS-length."
     )
+    if profile:
+        sys += " " + profile
+
     messages = [{"role": "system", "content": sys}, {"role": "user", "content": msg}]
     prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tok(prompt, return_tensors="pt").to(device)
@@ -372,9 +532,10 @@ async def chat(req: ChatReq):
     text = tok.decode(gen_ids, skip_special_tokens=True).strip()
     text = " ".join(text.split())
 
-    # store full text for MORE pagination
+    # Store full text for MORE pagination
     if req.session_id:
         db_store_chunk(req.session_id, text)
 
     dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
+    logger.info("CHAT out: channel=%s session_id=%s ms=%.1f chars=%d", chan, req.session_id, dt, len(text))
     return {"text": text or "OK"}

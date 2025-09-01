@@ -1,8 +1,8 @@
 /* global Twilio, fetch */
-// hm-twilio-safe2.js  — SMS + WhatsApp, word-safe chunking, MORE pagination, no TAG
-// Runtime target: Twilio Functions (Node 18.x)
+// hm-twilio-safe2.js — SMS + WhatsApp, word-safe chunking, MORE pagination,
+// House Rules on HELP, RESET gives welcome, no TAG.
+// Runtime: Twilio Functions (Node 18.x)
 
-// ===== Handler =====
 exports.handler = function (context, event, callback) {
     var MessagingResponse = Twilio.twiml.MessagingResponse;
     var twiml = new MessagingResponse();
@@ -16,23 +16,20 @@ exports.handler = function (context, event, callback) {
     }
   
     function isGSM7(s) {
-      for (var i = 0; i < s.length; i++) {
-        if (s.charCodeAt(i) > 127) return false;
-      }
+      for (var i = 0; i < s.length; i++) if (s.charCodeAt(i) > 127) return false;
       return true;
     }
   
-    // Word-safe chunking: avoid splitting mid-word/punct; keeps GSM7/UCS-2 segment limits
+    // Word-safe segmenting for SMS/WA
     function sendChunked(text) {
       var s = String(text || "").replace(/\s+/g, " ").trim();
       if (!s) { twiml.message(""); return; }
       var gsm = isGSM7(s);
-      var seg = gsm ? 153 : 67; // concatenated SMS segments
+      var seg = gsm ? 153 : 67;
       while (s.length > 0) {
         var take = Math.min(seg, s.length);
         var part = s.slice(0, take);
         if (take < s.length && /[A-Za-z0-9]/.test(s.charAt(take))) {
-          // backtrack to last space or punctuation within the part
           var back = part.search(/[ \t\n\r.,;:!?][^ \t\n\r.,;:!?]*$/);
           if (back > 0) part = part.slice(0, back + 1);
         }
@@ -47,7 +44,6 @@ exports.handler = function (context, event, callback) {
       return new Promise(function (_, reject) { reject(new Error(msg)); });
     }
   
-    // Simple timeout wrapper (no AbortController)
     function withTimeout(promiseFactory, ms, label) {
       return new Promise(function (resolve, reject) {
         var finished = false;
@@ -89,27 +85,27 @@ exports.handler = function (context, event, callback) {
     // ----- compliance -----
     var STOP_WORDS = ["STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"];
     var START_WORDS = ["START", "YES", "UNSTOP"];
-    var HELP_WORDS = ["HELP", "INFO"];
   
     if (!isWhatsApp && STOP_WORDS.indexOf(userMsgU) !== -1) {
       if (ECHO_OPT_OUT) { return reply("You’re unsubscribed. Reply START to resubscribe."); }
-      return send(new MessagingResponse()); // silent (Twilio processes STOP)
+      return send(new MessagingResponse());
     }
     if (!isWhatsApp && START_WORDS.indexOf(userMsgU) !== -1) {
       return reply("You’re resubscribed. Text HELP for help.");
     }
-    if (HELP_WORDS.indexOf(userMsgU) !== -1) {
-        var rules =
-          "House Rules:\n" +
-          "• TIME = current time\n" +
-          "• TZ Europe/Dublin = set timezone\n" +
-          "• MORE = continue long reply\n" +
-          "• STATS = usage metrics\n" +
-          "• RESET = clear session\n" +
-          "• STOP/START = opt out/in";
-        return reply(rules);
-      }
-      
+  
+    // ----- HELP / House Rules -----
+    if (/^\/?help$/i.test(userMsg)) {
+      var rules =
+        "House Rules:\n" +
+        "• TIME = current time\n" +
+        "• TZ Europe/Dublin = set timezone\n" +
+        "• MORE = continue long reply\n" +
+        "• STATS = usage metrics\n" +
+        "• RESET = clear session\n" +
+        "• STOP/START = opt out/in";
+      return reply(rules);
+    }
   
     // ----- diagnostics -----
     if (userMsgU === "DIAG") {
@@ -130,15 +126,18 @@ exports.handler = function (context, event, callback) {
         .catch(function () { return reply("model: unknown"); });
     }
   
-    if (userMsgU === "RESET") {
+    // ----- RESET -----
+    if (/^\/?reset$/i.test(userMsg)) {
       if (TODDRIC) {
         var hdrR = { "Content-Type": "application/json" };
         if (BEARER) { hdrR.Authorization = "Bearer " + BEARER; }
         fetch(TODDRIC.replace(/\/+$/, "") + "/reset", {
-          method: "POST", headers: hdrR, body: JSON.stringify({ session_id: sessionId })
+          method: "POST",
+          headers: hdrR,
+          body: JSON.stringify({ session_id: sessionId })
         }).catch(function () {});
       }
-      return reply("Okay, cleared our chat.");
+      return reply("Welcome to Toddric! 👋 Ask me anything in 1–2 sentences. Text HELP for House Rules.");
     }
   
     // ----- metrics over chat -----
@@ -196,7 +195,7 @@ exports.handler = function (context, event, callback) {
         session_id: sessionId,
         channel: isWhatsApp ? "wa" : "sms",
         max_new_tokens: MAX_NEW_LOCAL,
-        temperature: 0.0,                  // deterministic; server switches to greedy
+        temperature: 0.0,
         style: isWhatsApp ? "wa_short" : "sms_short",
         instruction: INSTRUCTION
       };
@@ -248,7 +247,6 @@ exports.handler = function (context, event, callback) {
       if (!responded) { responded = true; reply(String(text)); }
     }
   
-    // absolute guard
     setTimeout(function () {
       if (!responded) { safeReplyOnce("Sorry, that took too long. Try a shorter ask."); }
     }, OVERALL_TIMEOUT);
@@ -256,10 +254,8 @@ exports.handler = function (context, event, callback) {
     withTimeout(function () { return callToddric(); }, TODDRIC_TIMEOUT, "toddric_timeout")
       .then(function (txt) {
         if (!responded) {
-          // If long, nudge user to use MORE
           var compact = String(txt || "").replace(/\s+/g, " ").trim();
           if (compact.length > 300 && !isWhatsApp) {
-            // send first chunk here; server already stored full text for /more
             sendChunked(compact.slice(0, 300));
             twiml.message("Reply MORE for the next part.");
             responded = true; return send(twiml);
