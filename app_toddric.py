@@ -113,19 +113,29 @@ def db_next_chunk(session_id: str, max_len: int):
     DB.commit()
     return chunk, new_off, done
 
-# --- memory helpers ---
+# --- memory helpers (case-insensitive keys) ---
 def db_memory_set(session_id: str, key: str, value: str):
+    k = (key or "").strip().lower()[:64]
+    v = (value or "").strip()[:400]
     DB.execute(
         "INSERT INTO memory(session_id, key, value, updated_at) VALUES(?,?,?,?) "
         "ON CONFLICT(session_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (session_id, key, value, now_iso())
+        (session_id, k, v, now_iso())
     )
     DB.commit()
 
 def db_memory_get(session_id: str, key: str):
-    cur = DB.execute("SELECT value FROM memory WHERE session_id=? AND key=?", (session_id, key))
+    k = (key or "").strip()
+    cur = DB.execute(
+        "SELECT value FROM memory WHERE session_id=? AND lower(key)=lower(?) LIMIT 1",
+        (session_id, k)
+    )
     row = cur.fetchone()
     return row[0] if row else None
+
+def db_memory_list(session_id: str):
+    cur = DB.execute("SELECT key FROM memory WHERE session_id=? ORDER BY updated_at DESC", (session_id,))
+    return [r[0] for r in cur.fetchall()]
 
 def build_profile(session_id: str | None) -> str:
     if not session_id:
@@ -343,7 +353,7 @@ def reset(body: ResetReq):
 def memory_set(body: MemorySet):
     if not body.session_id or not body.key:
         raise HTTPException(400, "session_id and key required")
-    db_memory_set(body.session_id, body.key.strip()[:64], body.value.strip()[:400])
+    db_memory_set(body.session_id, body.key, body.value)
     return {"ok": True}
 
 @app.get("/memory")
@@ -352,6 +362,10 @@ def memory_get(session_id: str = Query(...), key: str = Query(...)):
     if v is None:
         raise HTTPException(404, "not found")
     return {"value": v}
+
+@app.get("/memory/list")
+def memory_list(session_id: str = Query(...)):
+    return {"keys": db_memory_list(session_id)}
 
 @app.get("/weather")
 def weather(loc: str = Query(..., description="city or place"), session_id: str | None = None):
@@ -463,14 +477,23 @@ async def chat(req: ChatReq):
         dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
         return {"text": txt}
 
-    # REMEMBER key: value
-    m_mem = re.match(r"^remember\s+([^:=]+)\s*[:=]\s*(.+)$", msg_norm, flags=re.I)
+    # REMEMBER key: value OR key=value OR key value
+    m_mem = re.match(r"^remember\s+(.+)$", msg_norm, flags=re.I)
     if m_mem and req.session_id:
-        k = m_mem.group(1).strip()[:64]
-        v = m_mem.group(2).strip()[:400]
+        rest = m_mem.group(1).strip()
+        if ":" in rest or "=" in rest:
+            parts = re.split(r"[:=]", rest, 1)
+            k = parts[0].strip().lower()[:64]
+            v = parts[1].strip()[:400] if len(parts) > 1 else ""
+        else:
+            parts = rest.split(None, 1)
+            k = (parts[0].strip().lower()[:64]) if parts else ""
+            v = (parts[1].strip()[:400]) if len(parts) > 1 else ""
+        if not k or not v:
+            return {"text": "Usage: REMEMBER key: value"}
         db_memory_set(req.session_id, k, v)
         dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
-        return {"text": f"Got it. I’ll remember {k}."}
+        return {"text": f"Saved {k}: {v[:120]}"}
 
     # RECALL key
     m_rec = re.match(r"^recall\s+(.+)$", msg_norm, flags=re.I)
@@ -484,10 +507,18 @@ async def chat(req: ChatReq):
     m_fgt = re.match(r"^forget\s+(.+)$", msg_norm, flags=re.I)
     if m_fgt and req.session_id:
         k = m_fgt.group(1).strip()
-        DB.execute("DELETE FROM memory WHERE session_id=? AND key=?", (req.session_id, k))
+        DB.execute("DELETE FROM memory WHERE session_id=? AND lower(key)=lower(?)", (req.session_id, k))
         DB.commit()
         dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
         return {"text": f"Forgot {k}."}
+
+    # LIST memory keys
+    if msg_norm.upper() in {"LIST", "MEMORY", "LIST MEMORY"} and req.session_id:
+        keys = db_memory_list(req.session_id)
+        dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
+        if not keys:
+            return {"text": "I don’t have anything stored yet."}
+        return {"text": "Stored keys: " + ", ".join(keys[:20])}
 
     # If it's the first message ever, greet and exit early
     if first_contact:
@@ -539,3 +570,28 @@ async def chat(req: ChatReq):
     dt = (time.perf_counter()-t0)*1000; chat_lat_ms.append(dt)
     logger.info("CHAT out: channel=%s session_id=%s ms=%.1f chars=%d", chan, req.session_id, dt, len(text))
     return {"text": text or "OK"}
+
+# --- Simple JSON generator for internal callers (voice bot, etc.) ---
+from typing import Optional
+
+class GenerateReq(BaseModel):
+    text: str
+    session_id: Optional[str] = None
+    temperature: float = 0.3
+    max_new_tokens: int = 64
+    timezone: Optional[str] = None
+
+@app.post("/api/generate")
+async def api_generate(body: GenerateReq):
+    # Reuse the existing /chat pipeline to keep behavior consistent
+    req = ChatReq(
+        message=body.text,
+        max_new_tokens=body.max_new_tokens,
+        temperature=body.temperature,
+        instruction=None,
+        session_id=body.session_id,
+        timezone=body.timezone,
+        channel="api",
+    )
+    res = await chat(req)  # chat() already returns {"text": "..."}
+    return {"reply": res.get("text", "").strip()}
