@@ -438,3 +438,25 @@ class ChatEngine:
         dt = time.time() - t0
         new_tokens = len(self.tok(out)["input_ids"])
         return {"new_tokens": new_tokens, "latency_s": round(dt,3), "tok_per_s": round(new_tokens/max(dt,1e-9),2), "output": out}
+
+# Create a global engine once
+_engine = None
+
+def _get_engine():
+    global _engine
+    if _engine is None:
+        model_path = os.getenv("TODDRIC_MODEL", "/home/todd/training/ckpts/toddric-1_5b-merged-v1")
+        cfg = EngineConfig(model=model_path)
+        _engine = ChatEngine(cfg)
+    return _engine
+
+def chat(message: str, session_id: str = "web") -> dict:
+    """Wrapper so FastAPI sees a top-level chat() function."""
+    eng = _get_engine()
+    reply = eng.chat(message)
+    return {
+        "text": reply,
+        "used_rag": False,       # set True if you hook RAG in
+        "provenance": {"source": "toddric_chat.ChatEngine"}
+    }
+
