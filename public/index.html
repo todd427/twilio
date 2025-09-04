@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>toddric — Web UI</title>
+  <style>
+    body { margin:0; background:#0b0c10; color:#e6e6e6; font:16px/1.4 system-ui,sans-serif; }
+    header { padding:12px 16px; background:#111317; border-bottom:1px solid #1f232a; }
+    .wrap { max-width:920px; margin:0 auto; padding:12px 16px 120px; }
+    .chat { display:flex; flex-direction:column; gap:12px; }
+    .bubble { max-width:80%; padding:10px 12px; border-radius:14px; white-space:pre-wrap; }
+    .user { align-self:flex-end; background:#1e3a8a; }
+    .bot { align-self:flex-start; background:#0b6b53; }
+    .composer { position:fixed; bottom:0; left:0; right:0; background:#111317; border-top:1px solid #1f232a; }
+    .composer .inner { max-width:920px; margin:0 auto; padding:12px 16px; display:grid; grid-template-columns:1fr auto; gap:10px; }
+    textarea { resize:none; height:84px; padding:10px 12px; background:#0e1116; color:#e6e6e6; border:1px solid #23262d; border-radius:12px; }
+    button { border:0; padding:0 16px; border-radius:12px; background:#3b82f6; color:white; font-weight:600; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <header><h1>toddric • Web UI</h1></header>
+  <div class="wrap">
+    <div id="chat" class="chat"></div>
+    <div class="composer">
+      <div class="inner">
+        <textarea id="input" placeholder="Type a message… (Shift+Enter = newline)"></textarea>
+        <button id="send">Send</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const el = s => document.querySelector(s);
+  const chat = el('#chat');
+  const input = el('#input');
+  const sendBtn = el('#send');
+
+  function addBubble(text, who='bot') {
+    const b = document.createElement('div');
+    b.className = `bubble ${who}`;
+    b.textContent = text;
+    chat.appendChild(b);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  async function sendMessage() {
+    const message = input.value.trim();
+    if (!message) return;
+    addBubble(message, 'user');
+    input.value = '';
+    sendBtn.disabled = true;
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, session_id: 'web' })
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        addBubble(`Error ${res.status}: ${msg}`, 'bot');
+      } else {
+        const data = await res.json();
+        addBubble(data.text || '[no reply]', 'bot');
+      }
+    } catch (err) {
+      addBubble('Network error', 'bot');
+      console.error(err);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  addBubble("Hi! I’m toddric on the web. Ask me anything.");
+})();
+</script>
+</body>
+</html>
+
