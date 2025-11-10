@@ -1,0 +1,25 @@
+# What to copy from the Twilio repo into the web build:
+[source]
+root = "."
+ignore_file = ".shipignore"
+
+# Where web’s runtime config should be emitted:
+[output]
+config_json = "config/config.json"
+env_example = "config/.env.example"
+
+# Simple token templating into files (Jinja2):
+[template]
+enabled = true
+# Files to process with templating (relative to src root)
+files = [
+  "web/index.html",
+  "web/app.config.js",
+  "web/.env.template"
+]
+
+# Values made available to templates:
+[vars]
+APP_NAME     = "toddric-web"
+BUILD_TARGET = "web"
+

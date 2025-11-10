@@ -1,0 +1,25 @@
+# Build & VCS
+.git/
+.venv/
+dist/
+dist/**
+node_modules/
+
+# Twilio-only
+.twilio/
+twilio.env
+twilio_local*
+Functions/
+.twilioserverless/
+
+# Dev-only scripts/logs
+scripts/dev/**
+logs/**
+*.log
+
+# Large/raw data
+data/raw/**
+store/**
+*.sqlite
+*.gguf
+

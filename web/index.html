@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ APP_NAME }} ({{ VERSION }})</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+  </head>
+  <body>
+    <h1>{{ APP_NAME }}</h1>
+    <p>Version: {{ VERSION }} • Built: {{ BUILD_ISO }}</p>
+    <script type="module">
+      import cfg from './app.config.js';
+      console.log('Booting', cfg);
+    </script>
+  </body>
+</html>
+

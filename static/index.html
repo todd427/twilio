@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Toddric Players</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --fg: #e6edf3;
+  --accent: #58a6ff;
+  --border: #30363d;
+  --user: #2f81f7;
+  --system: #8b949e;
+}
+body {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-size: 1.05rem;
+}
+header {
+  background: #161b22;
+  color: var(--fg);
+  padding: 0.75rem 1rem;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+#chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  line-height: 1.5;
+}
+.msg { margin-bottom: 1.2em; white-space: pre-wrap; }
+.me { font-weight: 600; color: var(--user); }
+.bot { color: var(--fg); }
+.system { color: var(--system); font-style: italic; }
+footer {
+  display: flex;
+  padding: 0.75rem;
+  background: #161b22;
+  border-top: 1px solid var(--border);
+}
+input, select {
+  flex: 1;
+  padding: 0.6rem;
+  font-size: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0d1117;
+  color: var(--fg);
+  margin-right: 0.5rem;
+}
+button {
+  padding: 0.6rem 1rem;
+  font-size: 1rem;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+button:hover { background: #1f6feb; }
+select:focus, input:focus, button:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+</style>
+</head>
+<body>
+<header>
+  <strong>Toddric Players</strong> — <select id="player"></select>
+</header>
+<div id="chat"></div>
+<footer>
+  <input id="input" placeholder="Type your message..." />
+  <button id="send">Send</button>
+</footer>
+
+<script>
+const chatBox = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const playerSelect = document.getElementById('player');
+const API = location.origin;
+let currentPlayer = "Player";
+
+function formatName(name) {
+  // Properly capitalize names with multiple words or titles
+  return name
+    .split(/[_\s]+/)
+    .map(w => w.length <= 3 && w === w.toUpperCase() ? w : w[0].toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+async function listPlayers() {
+  const r = await fetch(API + '/players');
+  const data = await r.json();
+  if (!Array.isArray(data.players) || !data.players.length) {
+    append('system', "No players found. Add JSON files in /players/");
+    return;
+  }
+  playerSelect.innerHTML = data.players.map(p => `<option>${formatName(p)}</option>`).join('');
+  currentPlayer = formatName(data.players[0]);
+  playerSelect.value = currentPlayer;
+}
+
+async function switchPlayer(name) {
+  currentPlayer = formatName(name);
+  const res = await fetch(API + '/player/' + name.toLowerCase().replace(/\s+/g,'_'), { method: 'POST' });
+  if (res.ok) append('system', `🎭 Switched to ${currentPlayer}`);
+  else append('system', `⚠️ Failed to switch player.`);
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  append('me', text);
+  try {
+    const res = await fetch(API + '/chat/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: text})
+    });
+    const reader = res.body.getReader();
+    let gotChunk = false;
+    while(true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      const chunk = new TextDecoder().decode(value);
+      updateLastBot(chunk);
+      gotChunk = true;
+    }
+    if (!gotChunk) append('bot', "(no response)");
+  } catch (e) {
+    append('system', "⚠️ Connection error.");
+  }
+}
+
+function append(who, text) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + who;
+  let label = "";
+  if (who === 'me') label = "You: ";
+  else if (who === 'bot') label = currentPlayer + ": ";
+  else label = "";
+  el.textContent = label + text;
+  chatBox.appendChild(el);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function updateLastBot(chunk) {
+  let last = chatBox.lastElementChild;
+  if (!last || !last.classList.contains('bot-stream')) {
+    last = document.createElement('div');
+    last.className = 'msg bot bot-stream';
+    last.textContent = currentPlayer + ": ";
+    chatBox.appendChild(last);
+  }
+  last.textContent += chunk;
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+sendBtn.onclick = sendMessage;
+input.onkeypress = e => { if (e.key === 'Enter') sendMessage(); };
+playerSelect.onchange = e => switchPlayer(e.target.value);
+
+listPlayers();
+</script>
+</body>
+</html>
+
