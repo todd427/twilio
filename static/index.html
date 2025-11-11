@@ -33,31 +33,46 @@ header {
   gap: 0.5rem;
   border-bottom: 1px solid var(--border);
 }
+.header-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex: 1;
+}
 #chat {
   flex: 1;
   overflow-y: auto;
   padding: 1rem;
   line-height: 1.6;
 }
-.msg { margin-bottom: 1.2em; white-space: pre-wrap; }
+.msg { 
+  margin-bottom: 1.2em; 
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
 .me { font-weight: 600; color: var(--user); }
 .bot { color: var(--fg); }
-.system { color: var(--system); font-style: italic; }
+.system { color: var(--system); font-style: italic; font-size: 0.95rem; }
 footer {
   display: flex;
   padding: 0.75rem;
   background: #161b22;
   border-top: 1px solid var(--border);
+  gap: 0.5rem;
 }
 input, select {
-  flex: 1;
   padding: 0.6rem;
   font-size: 1rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: #0d1117;
   color: var(--fg);
-  margin-right: 0.5rem;
+}
+#input {
+  flex: 1;
+}
+select {
+  min-width: 150px;
 }
 button {
   padding: 0.6rem 1rem;
@@ -68,17 +83,40 @@ button {
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.2s;
+  white-space: nowrap;
 }
 button:hover { background: #1f6feb; }
+button:disabled {
+  background: #30363d;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+button.secondary {
+  background: #21262d;
+  color: var(--fg);
+}
+button.secondary:hover {
+  background: #30363d;
+}
 select:focus, input:focus, button:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+.history-count {
+  font-size: 0.85rem;
+  color: var(--system);
+  padding: 0.3rem 0.6rem;
 }
 </style>
 </head>
 <body>
 <header>
-  <strong>Toddric Players</strong> — <select id="player"></select>
+  <strong>Players</strong>
+  <div class="header-controls">
+    <select id="player"></select>
+    <span class="history-count" id="historyCount">History: 0</span>
+    <button id="clearBtn" class="secondary">Clear</button>
+  </div>
 </header>
 <div id="chat"></div>
 <footer>
@@ -90,65 +128,147 @@ select:focus, input:focus, button:focus {
 const chatBox = document.getElementById('chat');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const clearBtn = document.getElementById('clearBtn');
 const playerSelect = document.getElementById('player');
+const historyCount = document.getElementById('historyCount');
 const API = location.origin;
 let currentPlayer = "Player";
+let isSending = false;
 
 function formatName(name) {
   return name
     .split(/[_\s]+/)
-    .map(w => w.length <= 3 && w === w.toUpperCase() ? w : w[0].toUpperCase() + w.slice(1))
+    .map(w => {
+      // Keep common lowercase words lowercase (the, a, an, of, and, etc.)
+      if (['the', 'a', 'an', 'of', 'and', 'or', 'in', 'on', 'at'].includes(w.toLowerCase()) && name.indexOf(w) > 0) {
+        return w.toLowerCase();
+      }
+      // Keep all-caps acronyms (3 chars or less)
+      if (w.length <= 3 && w === w.toUpperCase()) {
+        return w;
+      }
+      // Capitalize first letter
+      return w[0].toUpperCase() + w.slice(1).toLowerCase();
+    })
     .join(' ');
+}
+
+function updateHistoryCount(count) {
+  historyCount.textContent = `History: ${Math.floor(count / 2)} turns`;
+}
+
+async function getCurrentPlayer() {
+  try {
+    const res = await fetch(API + '/player');
+    const data = await res.json();
+    if (data.current) {
+      currentPlayer = data.current;
+      updateHistoryCount(data.history_length || 0);
+      return data.current;
+    }
+  } catch (e) {
+    console.error("Failed to get current player:", e);
+  }
+  return null;
 }
 
 async function listPlayers() {
   const r = await fetch(API + '/players');
   const data = await r.json();
+  
   if (!Array.isArray(data.players) || !data.players.length) {
-    append('system', "No players found. Add JSON files in /players/");
+    append('system', "⚠️ No players found. Add JSON files in /players/");
     return;
   }
 
-  playerSelect.innerHTML = data.players.map(p => `<option>${formatName(p)}</option>`).join('');
+  // Get current player from backend FIRST
+  const playerInfo = await fetch(API + '/player').then(r => r.json()).catch(() => null);
+  const currentName = playerInfo?.current;
+  const currentFilename = playerInfo?.filename;  // Use the exact filename from backend
+  
+  // Populate dropdown
+  playerSelect.innerHTML = data.players.map(p => {
+    const formatted = formatName(p);
+    return `<option value="${p}">${formatted}</option>`;
+  }).join('');
 
-  // Ask backend which player is active
-  try {
-    const s = await fetch(API + '/player');
-    const info = await s.json();
-    currentPlayer = formatName(info.current || data.players[0]);
-  } catch {
+  // Set current player - use the exact filename from backend
+  if (currentFilename) {
+    currentPlayer = currentName || formatName(currentFilename);
+    // Match by exact filename
+    const match = Array.from(playerSelect.options).find(opt => opt.value === currentFilename);
+    
+    if (match) {
+      playerSelect.value = match.value;
+    } else {
+      console.warn(`Could not find option for filename: ${currentFilename}`);
+    }
+  } else {
+    // Fallback to first player
     currentPlayer = formatName(data.players[0]);
   }
 
-  playerSelect.value = currentPlayer;
-  document.title = "Toddric Players — " + currentPlayer;
+  document.title = "Players — " + currentPlayer;
   append('system', `🎭 Current player: ${currentPlayer}`);
 }
 
 async function switchPlayer(name) {
-  currentPlayer = formatName(name);
-  const res = await fetch(API + '/player/' + name.toLowerCase().replace(/\s+/g,'_'), { method: 'POST' });
-  if (res.ok) {
-    append('system', `🎭 Switched to ${currentPlayer}`);
-    document.title = "Toddric Players — " + currentPlayer;
-  } else {
-    append('system', `⚠️ Failed to switch player.`);
+  // Convert display name back to filename format
+  const filename = name.toLowerCase().replace(/\s+/g, '_');
+  
+  try {
+    const res = await fetch(API + '/player/' + filename, { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      currentPlayer = data.player || formatName(name);
+      append('system', `🎭 Switched to ${currentPlayer} (history cleared)`);
+      document.title = "Players — " + currentPlayer;
+      updateHistoryCount(0);
+    } else {
+      append('system', `⚠️ Failed to switch player.`);
+    }
+  } catch (e) {
+    append('system', `⚠️ Error switching player: ${e.message}`);
+  }
+}
+
+async function clearHistory() {
+  try {
+    const res = await fetch(API + '/clear', { method: 'POST' });
+    if (res.ok) {
+      append('system', '🧹 Conversation history cleared');
+      updateHistoryCount(0);
+    }
+  } catch (e) {
+    append('system', `⚠️ Error clearing history: ${e.message}`);
   }
 }
 
 async function sendMessage() {
   const text = input.value.trim();
-  if (!text) return;
+  if (!text || isSending) return;
+  
+  isSending = true;
+  sendBtn.disabled = true;
   input.value = '';
+  input.disabled = true;
+  
   append('me', text);
+  
   try {
     const res = await fetch(API + '/chat/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text})
     });
+    
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    
     const reader = res.body.getReader();
     let gotChunk = false;
+    
     while(true) {
       const {done, value} = await reader.read();
       if (done) break;
@@ -156,9 +276,21 @@ async function sendMessage() {
       updateLastBot(chunk);
       gotChunk = true;
     }
-    if (!gotChunk) append('bot', "(no response)");
+    
+    if (!gotChunk) {
+      append('bot', "(no response)");
+    } else {
+      // Update history count (increment by 2 for user + assistant)
+      const currentCount = parseInt(historyCount.textContent.match(/\d+/)[0]);
+      updateHistoryCount((currentCount + 1) * 2);
+    }
   } catch (e) {
-    append('system', "⚠️ Connection error.");
+    append('system', "⚠️ Connection error: " + e.message);
+  } finally {
+    isSending = false;
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
   }
 }
 
@@ -167,7 +299,7 @@ function append(who, text) {
   el.className = 'msg ' + who;
   let label = "";
   if (who === 'me') label = "You: ";
-  else if (who === 'bot') label = currentPlayer + ": ";
+  else if (who === 'bot') label = currentPlayer + ":\n"; // Add newline after player name
   el.textContent = label + text;
   chatBox.appendChild(el);
   chatBox.scrollTop = chatBox.scrollHeight;
@@ -178,19 +310,23 @@ function updateLastBot(chunk) {
   if (!last || !last.classList.contains('bot-stream')) {
     last = document.createElement('div');
     last.className = 'msg bot bot-stream';
-    last.textContent = currentPlayer + ": ";
+    last.textContent = currentPlayer + ":\n"; // Add newline after player name
     chatBox.appendChild(last);
   }
   last.textContent += chunk;
   chatBox.scrollTop = chatBox.scrollHeight;
 }
 
+// Event listeners
 sendBtn.onclick = sendMessage;
-input.onkeypress = e => { if (e.key === 'Enter') sendMessage(); };
-playerSelect.onchange = e => switchPlayer(e.target.value);
+clearBtn.onclick = clearHistory;
+input.onkeypress = e => { 
+  if (e.key === 'Enter' && !isSending) sendMessage(); 
+};
+playerSelect.onchange = e => switchPlayer(playerSelect.options[playerSelect.selectedIndex].text);
 
+// Initialize
 listPlayers();
 </script>
 </body>
 </html>
-
